@@ -233,7 +233,19 @@ def apply_naukri(job: dict, cover_letter: str, config: dict) -> bool:
 
 # ── Gmail Monitor ─────────────────────────────────────────────────────────────
 def check_gmail_for_replies() -> list:
+<<<<<<< HEAD
     creds_data = json.loads(os.environ.get("GMAIL_CREDENTIALS", "{}"))
+=======
+    raw = os.environ.get("GMAIL_CREDENTIALS", "").strip()
+    if not raw:
+        logger.info("Gmail credentials not set, skipping.")
+        return []
+    try:
+        creds_data = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("GMAIL_CREDENTIALS invalid JSON, skipping.")
+        return []
+>>>>>>> cd03bfb (Fix Error)
     if not creds_data:
         logger.info("Gmail not configured, skipping.")
         return []
