@@ -20,6 +20,8 @@ GROQ_MODEL = "llama3-70b-8192"  # Free, fast, very capable
 
 # ── Groq AI Call ──────────────────────────────────────────────────────────────
 def groq_chat(prompt: str, max_tokens: int = 500) -> str:
+    # Trim prompt to max 2000 chars to avoid Groq 400 errors
+    prompt = prompt[:2000]
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
@@ -29,9 +31,13 @@ def groq_chat(prompt: str, max_tokens: int = 500) -> str:
         "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}]
     }
-    resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    try:
+        resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.error(f"Groq API error: {e}")
+        return ""
 
 # ── Telegram Alert ────────────────────────────────────────────────────────────
 def send_telegram(message: str):
@@ -48,9 +54,9 @@ def send_telegram(message: str):
 def generate_cover_letter(job: dict, resume_summary: str) -> str:
     prompt = f"""You are a professional job application assistant. Write a concise, tailored cover letter for this job.
 
-Job Title: {job['title']}
-Company: {job['company']}
-Job Description: {job['description'][:1000]}
+Job Title: {job['title'][:100]}
+Company: {job['company'][:100]}
+Job Description: {job['description'][:400]}
 
 Candidate Summary:
 {resume_summary}
@@ -67,9 +73,9 @@ Keep it under 200 words. Professional but human tone. Output only the cover lett
 def is_job_relevant(job: dict, preferences: dict) -> bool:
     prompt = f"""Evaluate if this job matches the candidate's preferences. Reply with ONLY the word YES or NO, nothing else.
 
-Job Title: {job['title']}
-Job Description: {job['description'][:500]}
-Required Skills: {job.get('skills', 'Not specified')}
+Job Title: {job['title'][:100]}
+Job Description: {job['description'][:300]}
+Required Skills: {str(job.get('skills', 'Not specified'))[:200]}
 
 Candidate Preferences:
 - Role type: {preferences['role_type']}
@@ -262,11 +268,16 @@ def run_pipeline():
         job_id = job["id"] or job["apply_url"]
         if job_id in applied_jobs:
             continue
-        if not is_job_relevant(job, preferences):
+        # AI relevance check
+        relevant = is_job_relevant(job, preferences)
+        if not relevant:
             logger.info(f"Skipping: {job['title']} at {job['company']}")
             continue
 
         cover_letter = generate_cover_letter(job, resume_summary)
+        if not cover_letter:
+            logger.warning(f"Cover letter generation failed for {job['title']}, skipping")
+            continue
         success = apply_to_job(job, cover_letter, config)
 
         if success:
