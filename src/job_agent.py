@@ -19,7 +19,7 @@ GROQ_MODEL = "llama3-70b-8192"
 
 # ── Groq AI Call ──────────────────────────────────────────────────────────────
 def groq_chat(prompt: str, max_tokens: int = 400) -> str:
-    prompt = prompt[:1500]  # hard cap to avoid 400 errors
+    prompt = prompt[:1500]
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
@@ -32,7 +32,7 @@ def groq_chat(prompt: str, max_tokens: int = 400) -> str:
     try:
         resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
         if resp.status_code == 400:
-            logger.error(f"Groq 400 error: {resp.text[:200]}")
+            logger.error(f"Groq 400: {resp.text[:200]}")
             return ""
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"].strip()
@@ -54,25 +54,68 @@ def send_telegram(message: str):
     except Exception as e:
         logger.error(f"Telegram error: {e}")
 
-# ── Cover Letter ──────────────────────────────────────────────────────────────
+# ── Cover Letter (with fallback) ──────────────────────────────────────────────
 def generate_cover_letter(job: dict, resume_summary: str) -> str:
     prompt = f"""Write a short 3-paragraph job cover letter.
 Role: {job['title'][:80]}
 Company: {job['company'][:80]}
-Job Info: {job['description'][:200]}
-About me: {resume_summary[:300]}
+About me: {resume_summary[:250]}
 Output only the cover letter text, under 150 words."""
-    return groq_chat(prompt, max_tokens=300)
+    result = groq_chat(prompt, max_tokens=300)
+
+    if not result:
+        # Fallback hardcoded cover letter — never fails
+        result = (
+            f"I am excited to apply for the {job['title']} position at {job['company']}. "
+            f"As a B.Tech Computer Science student at NIIT University, I have built production-grade "
+            f"applications using Python, Node.js, React, MongoDB, and LangChain AI agents.\n\n"
+            f"My projects include a full-stack finance platform, an AI-powered WhatsApp tax assistant, "
+            f"and an inventory management system — all built with SOLID principles and clean architecture. "
+            f"I have strong experience in REST APIs, JWT auth, and third-party integrations.\n\n"
+            f"I am eager to contribute and grow with your team. "
+            f"Thank you for considering my application."
+        )
+        logger.info(f"Using fallback cover letter for: {job['title']}")
+    return result
 
 # ── Job Relevance Filter ──────────────────────────────────────────────────────
-def is_job_relevant(job: dict, preferences: dict) -> bool:
-    prompt = f"""Does this job match the candidate? Reply YES or NO only.
-Job: {job['title'][:80]}
-Skills needed: {str(job.get('skills',''))[:150]}
-Candidate wants: {preferences['role_type']} roles, skills: {', '.join(preferences['skills'][:5])}
-Avoid: {preferences.get('avoid','')}"""
+def is_job_relevant(job: dict) -> bool:
+    title = job.get('title', '').lower()
+    skills = str(job.get('skills', '')).lower()
+    description = job.get('description', '').lower()
+
+    # Hard reject by title
+    reject_keywords = ['sales', 'bpo', 'telecaller', 'accountant', 'hardware',
+                       'civil', 'mechanical', 'teacher', 'nurse', 'driver', 'field executive']
+    for kw in reject_keywords:
+        if kw in title:
+            logger.info(f"Hard rejected: {job['title']}")
+            return False
+
+    # Auto approve by title — most common tech keywords
+    approve_keywords = ['software', 'developer', 'engineer', 'python', 'react',
+                        'node', 'full stack', 'fullstack', 'backend', 'frontend',
+                        'web', 'ai', 'ml', 'data', 'java', 'javascript', 'tech',
+                        'intern', 'programmer', 'devops', 'cloud', 'analyst', 'langchain']
+    for kw in approve_keywords:
+        if kw in title:
+            logger.info(f"Auto-approved: {job['title']}")
+            return True
+
+    # Empty description — approve by default
+    combined = (skills + description).strip()
+    if len(combined) < 50:
+        logger.info(f"Auto-approved (empty desc): {job['title']}")
+        return True
+
+    # Groq as last resort for ambiguous titles
+    prompt = f"""Does this job suit a software/tech fresher? Reply YES or NO only.
+Job title: {title[:80]}
+Skills: {skills[:100]}"""
     result = groq_chat(prompt, max_tokens=5)
-    return result.upper().startswith("YES")
+    approved = result.upper().startswith("YES")
+    logger.info(f"Groq says {'YES' if approved else 'NO'}: {job['title']}")
+    return approved
 
 # ── Naukri Scraper ────────────────────────────────────────────────────────────
 def scrape_naukri_jobs(keywords: list) -> list:
@@ -156,24 +199,36 @@ def save_applied_job(job_id: str):
 # ── Naukri Apply ──────────────────────────────────────────────────────────────
 def apply_naukri(job: dict, cover_letter: str, config: dict) -> bool:
     session = requests.Session()
-    headers = {"Content-Type": "application/json", "appid": "109", "systemid": "Naukri"}
+    headers = {
+        "Content-Type": "application/json",
+        "appid": "109",
+        "systemid": "Naukri",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
     try:
+        # Login
         login = session.post(
             "https://www.naukri.com/central-login-services/v1/login",
             json={"username": config["naukri_email"], "password": config["naukri_password"], "type": "login"},
             headers=headers, timeout=15
         )
+        logger.info(f"Naukri login status: {login.status_code} | response: {login.text[:200]}")
+
         if login.status_code != 200:
-            logger.error(f"Naukri login failed: {login.status_code}")
+            logger.error(f"Naukri login failed: {login.status_code} - {login.text[:300]}")
             return False
+
+        # Apply
         apply = session.post(
             f"https://www.naukri.com/jobapi/v4/job/{job['id']}/apply",
             json={"coverletter": cover_letter, "applysource": "NAUKRI"},
             headers=headers, timeout=15
         )
+        logger.info(f"Naukri apply status: {apply.status_code} | response: {apply.text[:200]}")
         return apply.status_code in [200, 201]
+
     except Exception as e:
-        logger.error(f"Naukri apply error: {e}")
+        logger.error(f"Naukri apply exception: {e}")
         return False
 
 # ── Gmail Monitor ─────────────────────────────────────────────────────────────
@@ -213,28 +268,21 @@ def check_gmail_for_replies() -> list:
 # ── Main Pipeline ─────────────────────────────────────────────────────────────
 def run_pipeline():
     start_time = datetime.now()
-    logger.info("🚀 Job Agent starting...")
+    logger.info("Job Agent starting...")
 
     config = {
         "naukri_email": os.environ.get("NAUKRI_EMAIL", ""),
         "naukri_password": os.environ.get("NAUKRI_PASSWORD", ""),
     }
 
-    preferences = {
-        "role_type": "Software/Tech",
-        "skills": ["Python", "JavaScript", "React", "Node.js", "LangChain", "MongoDB"],
-        "experience_level": "Fresher to 2 years",
-        "avoid": "Sales, BPO, non-tech, hardware"
-    }
-
     resume_summary = os.environ.get("RESUME_SUMMARY",
-        "B.Tech CS student skilled in Python, Node.js, React, LangChain, MongoDB. "
-        "Built full-stack apps and AI agents. Looking for software/full-stack/AI roles."
+        "B.Tech CS student at NIIT University. Skills: Python, Node.js, React, MongoDB, LangChain, AI agents. "
+        "Built SmartBudget finance app, GharKaCA WhatsApp AI assistant, SmartShelf inventory system. "
+        "Looking for software developer, full-stack, or AI engineer roles."
     )
 
     keywords = ["software developer", "python developer", "full stack developer", "react developer", "AI engineer"]
 
-    # Track stats
     stats = {
         "scanned": 0,
         "already_applied": 0,
@@ -265,27 +313,24 @@ def run_pipeline():
             stats["already_applied"] += 1
             continue
 
-        if not is_job_relevant(job, preferences):
+        if not is_job_relevant(job):
             stats["irrelevant"] += 1
-            logger.info(f"Irrelevant: {job['title']} @ {job['company']}")
             continue
 
         if job["source"] == "linkedin":
             stats["linkedin_found"] += 1
+            save_applied_job(job_id)
             send_telegram(
-                f"🔔 *LinkedIn Job Found*\n"
+                f"🔔 *LinkedIn Job — Apply Now*\n"
                 f"*Role:* {job['title']}\n"
                 f"*Company:* {job['company']}\n"
-                f"[Apply Now ↗]({job['apply_url']})"
+                f"[Apply Here]({job['apply_url']})"
             )
-            save_applied_job(job_id)
             continue
 
-        # Naukri — generate cover letter and apply
+        # Naukri — cover letter + apply
         cover_letter = generate_cover_letter(job, resume_summary)
-        if not cover_letter:
-            stats["cover_fail"] += 1
-            continue
+        # cover_letter always returns something now (fallback template)
 
         success = apply_naukri(job, cover_letter, config)
         if success:
@@ -302,34 +347,34 @@ def run_pipeline():
             time.sleep(4)
         else:
             stats["apply_fail"] += 1
+            logger.error(f"Apply failed for: {job['title']} @ {job['company']} | Job ID: {job['id']}")
 
-    # 3. Gmail check
+    # 3. Gmail
     replies = check_gmail_for_replies()
     for reply in replies:
         send_telegram(
-            f"📬 *Hiring Email Received!*\n"
+            f"📬 *Hiring Email!*\n"
             f"*From:* {reply['from']}\n"
             f"*Subject:* {reply['subject']}\n"
-            f"⚡ Open Gmail and respond now!"
+            f"⚡ Check Gmail now!"
         )
 
-    # 4. Detailed Summary to Telegram
+    # 4. Detailed summary
     duration = round((datetime.now() - start_time).seconds / 60, 1)
     jobs_list_text = "\n".join(stats["applied_jobs_list"]) if stats["applied_jobs_list"] else "None this run"
 
     summary = (
-        f"📊 *Job Agent — Run Report*\n"
+        f"📊 *Job Agent Report*\n"
         f"🕐 {start_time.strftime('%d %b %Y, %I:%M %p')}\n"
         f"⏱ Duration: {duration} min\n\n"
-        f"🔍 *Scanned:* {stats['scanned']} jobs\n"
+        f"🔍 Scanned: {stats['scanned']} jobs\n"
         f"⏭ Already applied: {stats['already_applied']}\n"
-        f"❌ Irrelevant (AI filtered): {stats['irrelevant']}\n\n"
-        f"✅ *Auto-applied (Naukri):* {stats['applied_naukri']}\n"
-        f"🔗 *LinkedIn jobs sent to you:* {stats['linkedin_found']}\n"
-        f"📬 *Hiring emails found:* {len(replies)}\n\n"
-        f"⚠️ Cover letter fails: {stats['cover_fail']}\n"
-        f"⚠️ Apply fails: {stats['apply_fail']}\n\n"
-        f"*Jobs applied this run:*\n{jobs_list_text}"
+        f"❌ Irrelevant: {stats['irrelevant']}\n\n"
+        f"✅ *Auto-applied Naukri:* {stats['applied_naukri']}\n"
+        f"🔗 *LinkedIn sent to you:* {stats['linkedin_found']}\n"
+        f"📬 *Hiring emails:* {len(replies)}\n"
+        f"⚠️ Apply failed: {stats['apply_fail']}\n\n"
+        f"*Applied this run:*\n{jobs_list_text}"
     )
     send_telegram(summary)
     logger.info("Pipeline complete.")
