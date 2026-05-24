@@ -2,7 +2,7 @@ name: Job Agent - Auto Apply Pipeline
 
 on:
   schedule:
-    - cron: '0 * * * *'   # runs every hour
+    - cron: '*/15 * * * *'   # runs every hour
   workflow_dispatch:        # allow manual trigger from GitHub UI
 
 jobs:
